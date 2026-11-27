@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<img class="hero" src="{{ url_for('image', name='site/header.png') }}" alt="" onerror="this.remove()">
+
+<details class="card form-card" {% if not posts %}open{% endif %}>
+  <summary>✏️ わからない問題を質問する</summary>
+  <form method="post" action="{{ url_for('create_post') }}" enctype="multipart/form-data">
+    <div class="row">
+      <label>ニックネーム<input name="nickname" maxlength="20" placeholder="名無しの高校生"></label>
+      <label>教科<select name="subject" required>
+        {% for s in subjects %}<option>{{ s }}</option>{% endfor %}
+      </select></label>
+    </div>
+    <label>タイトル<input name="title" maxlength="50" required placeholder="例：数Ⅱ 三角関数の合成がわからない"></label>
+    <label>質問の内容<textarea name="body" rows="4" maxlength="1000" required placeholder="問題文や、どこで止まっているかを書こう"></textarea></label>
+    <label>💡 どこまでわかった？（答える人のヒントになります）
+      <textarea name="understood" rows="2" maxlength="300" placeholder="例：加法定理は使えるけど、r と α の出し方がわからない"></textarea></label>
+    <div class="row">
+      <label>📷 問題の写真（任意・5MBまで）<input type="file" name="image" accept="image/*"></label>
+      <label>削除キー（4文字以上）<input name="delete_key" type="password" minlength="4" maxlength="20" required></label>
+    </div>
+    <p class="note">電話番号・メール・LINE IDなどの個人情報は書けません。</p>
+    <button class="btn primary">質問する</button>
+  </form>
+</details>
+
+<nav class="tabs">
+  <a href="{{ url_for('index', unsolved='1' if unsolved else None, sort=sort) }}" class="{{ 'active' if not subject }}">すべて</a>
+  {% for s in subjects %}
+    <a href="{{ url_for('index', subject=s, unsolved='1' if unsolved else None, sort=sort) }}" class="{{ 'active' if subject == s }}">{{ s }}</a>
+  {% endfor %}
+</nav>
+
+<form class="search" method="get">
+  <input type="hidden" name="subject" value="{{ subject }}">
+  <input name="q" value="{{ q }}" placeholder="キーワードで検索">
+  <label class="check"><input type="checkbox" name="unsolved" value="1" {% if unsolved %}checked{% endif %}> 未解決だけ</label>
+  <select name="sort"><option value="new" {% if sort=='new' %}selected{% endif %}>新しい順</option>
+    <option value="metoo" {% if sort=='metoo' %}selected{% endif %}>「わたしも！」が多い順</option></select>
+  <button class="btn">絞り込む</button>
+</form>
+
+{% for p in posts %}
+  <a class="card post {{ 'solved' if p.solved }}" href="{{ url_for('detail', pid=p.RowKey) }}">
+    <div class="meta"><span class="tag">{{ p.subject }}</span>
+      {% if p.solved %}<span class="tag done">解決！</span>{% endif %}
+      {% if p.image %}<span>📷</span>{% endif %}
+      <span class="date">{{ p.nickname }} ・ {{ p.created }}</span></div>
+    <h2>{{ p.title }}</h2>
+    <p class="excerpt">{{ p.body[:80] }}{% if p.body|length > 80 %}…{% endif %}</p>
+    <div class="stats"><span>🙋 わたしも！ {{ p.metoo }}</span><span>💬 回答 {{ p.replies }}</span></div>
+  </a>
+{% else %}
+  <p class="empty">まだ質問がありません。最初の質問をしてみよう！</p>
+{% endfor %}
+{% endblock %}

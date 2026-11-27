@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}テスマエ！{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <a href="{{ url_for('index') }}" class="logo">テスマエ<span>！</span></a>
+    <p class="tagline">テスト前の「わからない」を、みんなで解決。</p>
+    <nav><a href="{{ url_for('index') }}">質問一覧</a><a href="{{ url_for('about') }}">ルール</a></nav>
+  </header>
+  <main>
+    {% with msgs = get_flashed_messages(with_categories=true) %}
+      {% for cat, m in msgs %}<div class="flash {{ cat }}">{{ m }}</div>{% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>テスマエ！ — 高校生のための質問掲示板 ／ 保存先: {{ storage_mode }}</footer>
+</body>
+</html>

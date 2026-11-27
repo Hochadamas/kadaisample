@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ post.title }} - テスマエ！{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('index') }}">← 一覧にもどる</a></p>
+
+<article class="card {{ 'solved' if post.solved }}">
+  <div class="meta"><span class="tag">{{ post.subject }}</span>
+    {% if post.solved %}<span class="tag done">解決！</span>{% endif %}
+    <span class="date">{{ post.nickname }} ・ {{ post.created }}</span></div>
+  <h1>{{ post.title }}</h1>
+  <p class="body">{{ post.body }}</p>
+  {% if post.understood %}
+    <div class="hint"><strong>💡 ここまではわかった：</strong><br>{{ post.understood }}</div>
+  {% endif %}
+  {% if post.image %}
+    <img class="post-img" src="{{ url_for('image', name=post.image) }}" alt="問題の写真">
+  {% endif %}
+  <form method="post" action="{{ url_for('metoo', pid=post.RowKey) }}">
+    <button class="btn metoo">🙋 わたしも！ <b>{{ post.metoo }}</b></button>
+  </form>
+</article>
+
+<h2 class="section">💬 回答（{{ replies|length }}）</h2>
+{% for r in replies %}
+  <div class="card reply"><div class="meta"><span class="date">{{ r.nickname }} ・ {{ r.created }}</span></div>
+    <p class="body">{{ r.body }}</p></div>
+{% else %}
+  <p class="empty">まだ回答がありません。わかる人、教えてあげて！</p>
+{% endfor %}
+
+<form class="card" method="post" action="{{ url_for('reply', pid=post.RowKey) }}">
+  <label>ニックネーム<input name="nickname" maxlength="20" placeholder="名無しの高校生"></label>
+  <label>回答<textarea name="body" rows="4" maxlength="1000" required placeholder="やさしく、途中の考え方も書いてあげよう"></textarea></label>
+  <button class="btn primary">回答する</button>
+</form>
+
+<details class="card owner">
+  <summary>質問した人へ（解決・削除）</summary>
+  <form method="post" action="{{ url_for('solve', pid=post.RowKey) }}" class="row">
+    <input name="delete_key" type="password" placeholder="削除キー" required>
+    <button class="btn">✅ 解決済みにする</button>
+  </form>
+  <form method="post" action="{{ url_for('delete', pid=post.RowKey) }}" class="row">
+    <input name="delete_key" type="password" placeholder="削除キー" required>
+    <button class="btn danger">🗑 削除する</button>
+  </form>
+</details>
+{% endblock %}

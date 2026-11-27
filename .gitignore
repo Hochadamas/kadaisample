@@ -1,0 +1,10 @@
+# 秘密情報は絶対にコミットしない
+.env
+*.PublishSettings
+*.publishsettings
+local.settings.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
