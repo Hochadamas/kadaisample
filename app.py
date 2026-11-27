@@ -1,87 +1,86 @@
-"""テスマエ！ - テスト前の「わからない」を助け合う掲示板 (Flask)
-
-環境変数:
-  AZURE_STORAGE_CONNECTION_STRING  ストレージアカウントの接続文字列（未設定ならメモリ保存で動く）
-  SECRET_KEY                       Flaskのセッション用キー
-  TABLE_NAME (任意, 既定 posts) / BLOB_CONTAINER (任意, 既定 images)
-"""
 import os
 import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from flask import (Flask, Response, abort, flash, redirect, render_template,
-                   request, session, url_for)
-from werkzeug.security import check_password_hash, generate_password_hash
+from flask import Flask, Response, render_template, request, redirect, url_for, flash, session, abort
+from werkzeug.security import generate_password_hash, check_password_hash
 
 JST = timezone(timedelta(hours=9))
-CONN = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
 TABLE_NAME = os.environ.get("TABLE_NAME", "posts")
-CONTAINER = os.environ.get("BLOB_CONTAINER", "images")
+CONTAINER_NAME = os.environ.get("BLOB_CONTAINER", "images")
 
 SUBJECTS = ["国語", "数学", "英語", "理科", "社会", "情報", "その他"]
-# 拡張子 → Content-Type（ブラウザが送る値は信用しない：SVGなどによるXSS対策）
-IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-               "gif": "image/gif", "webp": "image/webp"}
-ALLOWED_EXT = set(IMAGE_TYPES)
+DEFAULT_NICKNAME = "名無しの高校生"
+
+# content type is decided from the extension, never from what the browser sends
+IMAGE_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+}
+
 NG_WORDS = ["死ね", "しね", "殺す", "ころす", "きもい", "キモい", "うざい", "ウザい", "バカ", "ばか"]
-PERSONAL_PATTERNS = [
-    re.compile(r"(?<!\d)0\d{1,4}[-ー－(（]\d{1,4}[-ー－)）]\d{4}(?!\d)"),  # 電話番号（区切りあり）
-    re.compile(r"(?<!\d)0\d{9,10}(?!\d)"),                        # 電話番号（10〜11桁）
-    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),                      # メールアドレス
-    re.compile(r"(line|ライン)\s*(id|ＩＤ|ID)", re.IGNORECASE),    # LINE ID
-    re.compile(r"(住所|じゅうしょ)\s*[:：は]"),                    # 住所
+PERSONAL_INFO_REGEXES = [
+    re.compile(r"(?<!\d)0\d{1,4}[-ー－(（]\d{1,4}[-ー－)）]\d{4}(?!\d)"),  # phone with separators
+    re.compile(r"(?<!\d)0\d{9,10}(?!\d)"),  # phone without separators
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),  # email
+    re.compile(r"(line|ライン)\s*(id|ＩＤ|ID)", re.IGNORECASE),  # LINE ID
+    re.compile(r"(住所|じゅうしょ)\s*[:：は]"),  # address
 ]
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 画像は5MBまで
-app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-only-change-me")
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 MB max per upload
 
 
-# ---------------------------------------------------------------- storage
+# Storage
+
 class AzureStore:
-    """Table Storage + Blob Storage に保存する"""
+    # posts and replies in Table Storage, images in Blob Storage
 
-    def __init__(self, conn):
+    def __init__(self, connection_string):
         from azure.data.tables import TableServiceClient
         from azure.storage.blob import BlobServiceClient
 
-        self.table = TableServiceClient.from_connection_string(conn).create_table_if_not_exists(TABLE_NAME)
-        self.container = BlobServiceClient.from_connection_string(conn).get_container_client(CONTAINER)
-        try:
-            self.container.create_container()  # プライベートで作成
-        except Exception:
-            pass  # 既にある
+        table_service = TableServiceClient.from_connection_string(connection_string)
+        self.table = table_service.create_table_if_not_exists(TABLE_NAME)
 
-    def query(self, pk):
-        return list(self.table.query_entities("PartitionKey eq @pk", parameters={"pk": pk}))
+        blob_service = BlobServiceClient.from_connection_string(connection_string)
+        self.container = blob_service.get_container_client(CONTAINER_NAME)
+        if not self.container.exists():
+            self.container.create_container()  # private by default
 
-    def get(self, pk, rk):
+    def query(self, partition):
+        return list(self.table.query_entities("PartitionKey eq @pk", parameters={"pk": partition}))
+
+    def get(self, partition, row):
         try:
-            return dict(self.table.get_entity(pk, rk))
+            return dict(self.table.get_entity(partition, row))
         except Exception:
             return None
 
     def upsert(self, entity):
         self.table.upsert_entity(entity)
 
-    def delete(self, pk, rk):
-        self.table.delete_entity(pk, rk)
+    def delete(self, partition, row):
+        self.table.delete_entity(partition, row)
 
     def save_image(self, name, data, content_type):
         from azure.storage.blob import ContentSettings
 
-        self.container.upload_blob(name, data, overwrite=True,
-                                   content_settings=ContentSettings(content_type=content_type))
+        settings = ContentSettings(content_type=content_type)
+        self.container.upload_blob(name, data, overwrite=True, content_settings=settings)
 
     def load_image(self, name):
         try:
-            blob = self.container.get_blob_client(name)
-            props = blob.get_blob_properties()
-            return blob.download_blob().readall(), props.content_settings.content_type
+            return self.container.download_blob(name).readall()
         except Exception:
-            return None, None
+            return None
 
     def delete_image(self, name):
         try:
@@ -91,209 +90,232 @@ class AzureStore:
 
 
 class MemoryStore:
-    """接続文字列がないとき（ローカル確認用）"""
+    # used locally when there is no connection string (data is lost on restart)
 
     def __init__(self):
-        self.rows, self.images = {}, {}
+        self.rows = {}
+        self.images = {}
 
-    def query(self, pk):
-        return [dict(v) for (p, _), v in sorted(self.rows.items()) if p == pk]
+    def query(self, partition):
+        return [dict(entity) for (pk, _), entity in sorted(self.rows.items()) if pk == partition]
 
-    def get(self, pk, rk):
-        v = self.rows.get((pk, rk))
-        return dict(v) if v else None
+    def get(self, partition, row):
+        entity = self.rows.get((partition, row))
+        return dict(entity) if entity else None
 
     def upsert(self, entity):
         self.rows[(entity["PartitionKey"], entity["RowKey"])] = dict(entity)
 
-    def delete(self, pk, rk):
-        self.rows.pop((pk, rk), None)
+    def delete(self, partition, row):
+        self.rows.pop((partition, row), None)
 
     def save_image(self, name, data, content_type):
-        self.images[name] = (data, content_type)
+        self.images[name] = data
 
     def load_image(self, name):
-        return self.images.get(name, (None, None))
+        return self.images.get(name)
 
     def delete_image(self, name):
         self.images.pop(name, None)
 
 
-store = AzureStore(CONN) if CONN else MemoryStore()
+store = AzureStore(CONNECTION_STRING) if CONNECTION_STRING else MemoryStore()
 
 
-# ---------------------------------------------------------------- helpers
-def now_str():
+# Helpers
+
+def now_text():
     return datetime.now(JST).strftime("%Y/%m/%d %H:%M")
 
 
-def new_key(newest_first):
-    ms = int(time.time() * 1000)
-    head = 10**13 - ms if newest_first else ms
-    return f"{head:013d}-{uuid.uuid4().hex[:6]}"
+def make_row_key(newest_first):
+    # Table Storage sorts by RowKey, so a reversed timestamp puts new posts first
+    millis = int(time.time() * 1000)
+    number = 10**13 - millis if newest_first else millis
+    return f"{number:013d}-{uuid.uuid4().hex[:6]}"
 
 
 def check_text(*texts):
-    """問題があればエラーメッセージを返す"""
-    joined = " ".join(texts)
-    if any(w in joined for w in NG_WORDS):
+    all_text = " ".join(texts)
+    if any(word in all_text for word in NG_WORDS):
         return "傷つける言葉が含まれています。言い方を変えてみてください。"
-    if any(p.search(joined) for p in PERSONAL_PATTERNS):
+    if any(regex.search(all_text) for regex in PERSONAL_INFO_REGEXES):
         return "電話番号・メールアドレス・LINE ID・住所などの個人情報は書けません。"
     return None
 
 
-def clean(field, limit):
-    return (request.form.get(field) or "").strip()[:limit]
+def form_value(field, max_length):
+    return (request.form.get(field) or "").strip()[:max_length]
 
 
-# ---------------------------------------------------------------- routes
+def get_post_or_404(post_id):
+    post = store.get("post", post_id)
+    if post is None:
+        abort(404)
+    return post
+
+
+# Routes
+
 @app.route("/")
 def index():
     subject = request.args.get("subject", "")
-    q = request.args.get("q", "").strip()
+    search = request.args.get("q", "").strip()
     unsolved = request.args.get("unsolved") == "1"
     sort = request.args.get("sort", "new")
 
     posts = store.query("post")
     if subject in SUBJECTS:
-        posts = [p for p in posts if p.get("subject") == subject]
+        posts = [post for post in posts if post.get("subject") == subject]
     if unsolved:
-        posts = [p for p in posts if not p.get("solved")]
-    if q:
-        posts = [p for p in posts if q in p.get("title", "") or q in p.get("body", "")]
-    posts.sort(key=lambda p: p["RowKey"])  # 新しい順
+        posts = [post for post in posts if not post.get("solved")]
+    if search:
+        posts = [post for post in posts if search in post.get("title", "") or search in post.get("body", "")]
+
+    posts.sort(key=lambda post: post["RowKey"])
     if sort == "metoo":
-        posts.sort(key=lambda p: -int(p.get("metoo", 0)))
+        posts.sort(key=lambda post: int(post.get("metoo", 0)), reverse=True)
+
     return render_template("index.html", posts=posts, subjects=SUBJECTS, subject=subject,
-                           q=q, unsolved=unsolved, sort=sort)
+                           q=search, unsolved=unsolved, sort=sort)
 
 
-@app.post("/post")
+@app.route("/post", methods=["POST"])
 def create_post():
-    nickname = clean("nickname", 20) or "名無しの高校生"
+    nickname = form_value("nickname", 20) or DEFAULT_NICKNAME
     subject = request.form.get("subject")
-    title, body = clean("title", 50), clean("body", 1000)
-    understood = clean("understood", 300)
-    key = clean("delete_key", 20)
+    title = form_value("title", 50)
+    body = form_value("body", 1000)
+    understood = form_value("understood", 300)
+    delete_key = form_value("delete_key", 20)
 
     if subject not in SUBJECTS or not title or not body:
         flash("教科・タイトル・本文は必須です。", "error")
         return redirect(url_for("index"))
-    if len(key) < 4:
+    if len(delete_key) < 4:
         flash("削除キーは4文字以上にしてください。", "error")
         return redirect(url_for("index"))
-    err = check_text(nickname, title, body, understood)
-    if err:
-        flash(err, "error")
+    error = check_text(nickname, title, body, understood)
+    if error:
+        flash(error, "error")
         return redirect(url_for("index"))
 
     image_name = ""
-    f = request.files.get("image")
-    if f and f.filename:
-        ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
-        if ext not in ALLOWED_EXT:
+    uploaded_file = request.files.get("image")
+    if uploaded_file and uploaded_file.filename:
+        extension = uploaded_file.filename.rsplit(".", 1)[-1].lower() if "." in uploaded_file.filename else ""
+        if extension not in IMAGE_TYPES:
             flash("画像は jpg / png / gif / webp だけです。", "error")
             return redirect(url_for("index"))
-        image_name = f"posts/{uuid.uuid4().hex}.{ext}"
-        store.save_image(image_name, f.read(), IMAGE_TYPES[ext])
+        image_name = f"posts/{uuid.uuid4().hex}.{extension}"
+        store.save_image(image_name, uploaded_file.read(), IMAGE_TYPES[extension])
 
     store.upsert({
-        "PartitionKey": "post", "RowKey": new_key(newest_first=True),
-        "nickname": nickname, "subject": subject, "title": title, "body": body,
-        "understood": understood, "image": image_name, "metoo": 0, "solved": False,
-        "replies": 0, "delete_hash": generate_password_hash(key), "created": now_str(),
+        "PartitionKey": "post",
+        "RowKey": make_row_key(newest_first=True),
+        "nickname": nickname,
+        "subject": subject,
+        "title": title,
+        "body": body,
+        "understood": understood,
+        "image": image_name,
+        "metoo": 0,
+        "solved": False,
+        "replies": 0,
+        "delete_hash": generate_password_hash(delete_key),
+        "created": now_text(),
     })
     flash("質問を投稿しました！", "ok")
     return redirect(url_for("index"))
 
 
-def get_post_or_404(pid):
-    post = store.get("post", pid)
-    if not post:
-        abort(404)
-    return post
-
-
-@app.route("/post/<pid>")
-def detail(pid):
-    post = get_post_or_404(pid)
-    replies = sorted(store.query(f"reply-{pid}"), key=lambda r: r["RowKey"])
+@app.route("/post/<post_id>")
+def detail(post_id):
+    post = get_post_or_404(post_id)
+    replies = sorted(store.query(f"reply-{post_id}"), key=lambda reply: reply["RowKey"])
     return render_template("detail.html", post=post, replies=replies)
 
 
-@app.post("/post/<pid>/reply")
-def reply(pid):
-    post = get_post_or_404(pid)
-    nickname = clean("nickname", 20) or "名無しの高校生"
-    body = clean("body", 1000)
+@app.route("/post/<post_id>/reply", methods=["POST"])
+def reply(post_id):
+    post = get_post_or_404(post_id)
+    nickname = form_value("nickname", 20) or DEFAULT_NICKNAME
+    body = form_value("body", 1000)
+
     if not body:
         flash("回答を書いてください。", "error")
-        return redirect(url_for("detail", pid=pid))
-    err = check_text(nickname, body)
-    if err:
-        flash(err, "error")
-        return redirect(url_for("detail", pid=pid))
-    store.upsert({"PartitionKey": f"reply-{pid}", "RowKey": new_key(newest_first=False),
-                  "nickname": nickname, "body": body, "created": now_str()})
+        return redirect(url_for("detail", post_id=post_id))
+    error = check_text(nickname, body)
+    if error:
+        flash(error, "error")
+        return redirect(url_for("detail", post_id=post_id))
+
+    store.upsert({
+        "PartitionKey": f"reply-{post_id}",
+        "RowKey": make_row_key(newest_first=False),
+        "nickname": nickname,
+        "body": body,
+        "created": now_text(),
+    })
     post["replies"] = int(post.get("replies", 0)) + 1
     store.upsert(post)
     flash("回答しました。ありがとう！", "ok")
-    return redirect(url_for("detail", pid=pid))
+    return redirect(url_for("detail", post_id=post_id))
 
 
-@app.post("/post/<pid>/metoo")
-def metoo(pid):
-    post = get_post_or_404(pid)
+@app.route("/post/<post_id>/metoo", methods=["POST"])
+def metoo(post_id):
+    post = get_post_or_404(post_id)
     voted = session.get("metoo", [])
-    if pid not in voted:  # 同じ人が何回も押せないようにする
+    # one vote per person (kept in the session cookie)
+    if post_id not in voted:
         post["metoo"] = int(post.get("metoo", 0)) + 1
         store.upsert(post)
-        session["metoo"] = (voted + [pid])[-200:]
-    return redirect(url_for("detail", pid=pid))
+        session["metoo"] = (voted + [post_id])[-200:]
+    return redirect(url_for("detail", post_id=post_id))
 
 
-@app.post("/post/<pid>/solve")
-def solve(pid):
-    post = get_post_or_404(pid)
-    if not check_password_hash(post["delete_hash"], clean("delete_key", 20)):
+@app.route("/post/<post_id>/solve", methods=["POST"])
+def solve(post_id):
+    post = get_post_or_404(post_id)
+    if not check_password_hash(post["delete_hash"], form_value("delete_key", 20)):
         flash("削除キーが違います。", "error")
     else:
         post["solved"] = True
         store.upsert(post)
         flash("解決済みにしました！", "ok")
-    return redirect(url_for("detail", pid=pid))
+    return redirect(url_for("detail", post_id=post_id))
 
 
-@app.post("/post/<pid>/delete")
-def delete(pid):
-    post = get_post_or_404(pid)
-    if not check_password_hash(post["delete_hash"], clean("delete_key", 20)):
+@app.route("/post/<post_id>/delete", methods=["POST"])
+def delete(post_id):
+    post = get_post_or_404(post_id)
+    if not check_password_hash(post["delete_hash"], form_value("delete_key", 20)):
         flash("削除キーが違います。", "error")
-        return redirect(url_for("detail", pid=pid))
-    for r in store.query(f"reply-{pid}"):
-        store.delete(r["PartitionKey"], r["RowKey"])
+        return redirect(url_for("detail", post_id=post_id))
+
+    for reply in store.query(f"reply-{post_id}"):
+        store.delete(reply["PartitionKey"], reply["RowKey"])
     if post.get("image"):
         store.delete_image(post["image"])
-    store.delete("post", pid)
+    store.delete("post", post_id)
     flash("質問を削除しました。", "ok")
     return redirect(url_for("index"))
 
 
 @app.route("/image/<path:name>")
 def image(name):
-    """Blob Storage の画像を表示する（コンテナは非公開のまま）"""
+    # images go through Flask so the blob container can stay private
     if ".." in name or not re.fullmatch(r"[\w\-./]+", name):
         abort(404)
-    ext = name.rsplit(".", 1)[-1].lower()
-    if ext not in IMAGE_TYPES:
+    extension = name.rsplit(".", 1)[-1].lower()
+    if extension not in IMAGE_TYPES:
         abort(404)
-    data, _ = store.load_image(name)
+    data = store.load_image(name)
     if data is None:
         abort(404)
-    return Response(data, mimetype=IMAGE_TYPES[ext],
-                    headers={"Cache-Control": "public, max-age=86400",
-                             "X-Content-Type-Options": "nosniff"})
+    headers = {"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"}
+    return Response(data, mimetype=IMAGE_TYPES[extension], headers=headers)
 
 
 @app.route("/about")
@@ -302,14 +324,14 @@ def about():
 
 
 @app.errorhandler(413)
-def too_large(_):
+def file_too_large(error):
     flash("画像が大きすぎます（5MBまで）。", "error")
     return redirect(url_for("index"))
 
 
 @app.context_processor
-def inject():
-    return {"storage_mode": "Azure" if CONN else "メモリ（ローカル）"}
+def storage_info():
+    return {"storage_mode": "Azure" if CONNECTION_STRING else "メモリ（ローカル）"}
 
 
 if __name__ == "__main__":

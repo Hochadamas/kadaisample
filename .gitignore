@@ -1,10 +1,11 @@
-# 秘密情報は絶対にコミットしない
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
 .env
 *.PublishSettings
 *.publishsettings
-local.settings.json
-
-__pycache__/
-*.pyc
-.venv/
-venv/
+.vscode/
+.DS_Store
+Thumbs.db
