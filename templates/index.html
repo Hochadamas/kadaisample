@@ -40,17 +40,29 @@
   <button class="btn">絞り込む</button>
 </form>
 
-{% for p in posts %}
+{% if posts %}
+<div class="post-grid">
+  {% for p in posts %}
   <a class="card post {{ 'solved' if p.solved }}" href="{{ url_for('detail', pid=p.RowKey) }}">
-    <div class="meta"><span class="tag">{{ p.subject }}</span>
-      {% if p.solved %}<span class="tag done">解決！</span>{% endif %}
-      {% if p.image %}<span>📷</span>{% endif %}
-      <span class="date">{{ p.nickname }} ・ {{ p.created }}</span></div>
-    <h2>{{ p.title }}</h2>
-    <p class="excerpt">{{ p.body[:80] }}{% if p.body|length > 80 %}…{% endif %}</p>
-    <div class="stats"><span>🙋 わたしも！ {{ p.metoo }}</span><span>💬 回答 {{ p.replies }}</span></div>
+    <div class="post-thumb">
+      {% if p.image %}
+        <img src="{{ url_for('image', name=p.image) }}" alt="問題の写真" loading="lazy">
+      {% else %}
+        <div class="no-image">{{ p.subject }}</div>
+      {% endif %}
+      <span class="badge subject">{{ p.subject }}</span>
+      {% if p.solved %}<span class="badge done">解決！</span>{% endif %}
+    </div>
+    <div class="post-info">
+      <h2>{{ p.title }}</h2>
+      <p class="date">{{ p.nickname }} ・ {{ p.created }}</p>
+      <p class="excerpt">{{ p.body[:70] }}{% if p.body|length > 70 %}…{% endif %}</p>
+      <div class="stats"><span>🙋 わたしも！ <b>{{ p.metoo }}</b></span><span>💬 回答 <b>{{ p.replies }}</b></span></div>
+    </div>
   </a>
+  {% endfor %}
+</div>
 {% else %}
   <p class="empty">まだ質問がありません。最初の質問をしてみよう！</p>
-{% endfor %}
+{% endif %}
 {% endblock %}
